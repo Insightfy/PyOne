@@ -13,13 +13,13 @@ def md5(string):
     return a.hexdigest()
 
 def GetTotal(path='{}:/'.format(GetConfig('default_pan'))):
-    key='total:{}'.format(path)
+    key='file_count:{}'.format(path)
     if redis_client.exists(key):
         return int(redis_client.get(key))
     else:
         user,n_path=path.split(':')
         if n_path=='/':
-            total=mon_db.items.find({'grandid':0}).count()
+            total=mon_db.items.find({'grandid':0,'user':user}).count()
         else:
             f=mon_db.items.find_one({'path':path})
             pid=f['id']
@@ -29,7 +29,8 @@ def GetTotal(path='{}:/'.format(GetConfig('default_pan'))):
 
 
 # @cache.memoize(timeout=60*5)
-def FetchData(path='{}:/'.format(GetConfig('default_pan')),page=1,per_page=50,sortby='lastModtime',order='desc',dismiss=False,search_mode=False):
+def FetchData(path='{}:/'.format(GetConfig('default_pan')),page=1,per_page=50,sortby='lastModtime',order='desc',action=None,dismiss=False,search_mode=False):
+    balance=eval(GetConfig('balance'))
     if search_mode:
         show_secret=GetConfig('show_secret')
         query=mon_db.items.find({'name':re.compile(path)})
@@ -94,6 +95,27 @@ def FetchData(path='{}:/'.format(GetConfig('default_pan')),page=1,per_page=50,so
             f=mon_db.items.find_one({'path':path})
             pid=f['id']
             if f['type']!='folder':
+                if balance and action!='share':
+                    user,p=path.split(':')
+                    files=mon_db.items.find({'path':re.compile(p)})
+                    key='balance:{}'.format(p)
+                    users=[]
+                    for file in files:
+                        suser=file['user']
+                        if redis_client.hexists(key,suser):
+                            cnt=redis_client.hget(key,suser)
+                            if cnt is None:
+                                cnt=0
+                            else:
+                                cnt=int(cnt)
+                        else:
+                            cnt=0
+                        users.append([suser,cnt])
+                    users.sort(key=lambda x:x[1])
+                    ssuser=users[0][0]
+                    pp='{}:{}'.format(ssuser,p)
+                    redis_client.hincrby(key,ssuser,1)
+                    f=mon_db.items.find_one({'path':pp})
                 return f,'files'
             data=mon_db.items.find({'parent':pid}).collation({"locale": "zh", 'numericOrdering':True})\
                 .sort([('order',ASCENDING),(sortby,order)])\
@@ -112,18 +134,23 @@ def FetchData(path='{}:/'.format(GetConfig('default_pan')),page=1,per_page=50,so
                 else:
                     resp.append(item)
             total=GetTotal(path)
-    except:
+    except Exception as e:
+        exestr=traceback.format_exc()
         resp=[]
         total=0
     return resp,total
 
-@cache.memoize(timeout=60*5)
+# @cache.memoize(timeout=60*5)
 def _thunbnail(id,user):
-    app_url=GetAppUrl()
+    app_url=GetAppUrl(user)
+    od_type=get_value('od_type',user)
     token=GetToken(user=user)
     headers={'Authorization':'bearer {}'.format(token),'Content-type':'application/json'}
     headers.update(default_headers)
-    url=app_url+'v1.0/me/drive/items/{}/thumbnails/0?select=large'.format(id)
+    if od_type=='nocn' or od_type is None or od_type==False:
+        url=app_url+'v1.0/me/drive/items/{}/thumbnails/0?select=large'.format(id)
+    else:
+        url=app_url+'_api/v2.0/me/drive/items/{}/thumbnails/0?select=large'.format(id)
     r=browser.get(url,headers=headers)
     data=json.loads(r.content)
     if data.get('large').get('url'):
@@ -135,17 +162,23 @@ def _thunbnail(id,user):
 
 # @cache.memoize(timeout=60*5)
 def _getdownloadurl(id,user):
-    app_url=GetAppUrl()
+    app_url=GetAppUrl(user)
+    od_type=get_value('od_type',user)
     token=GetToken(user=user)
     filename=GetName(id)
     ext=filename.split('.')[-1].lower()
     headers={'Authorization':'bearer {}'.format(token),'Content-type':'application/json'}
     headers.update(default_headers)
-    url=app_url+'v1.0/me/drive/items/'+id
+    if od_type=='nocn' or od_type is None or od_type==False:
+        url=app_url+'v1.0/me/drive/items/'+id
+    else:
+        url=app_url+'_api/v2.0/me/drive/items/'+id
     r=browser.get(url,headers=headers)
     data=json.loads(r.content)
     if data.get('@microsoft.graph.downloadUrl'):
         downloadUrl=data.get('@microsoft.graph.downloadUrl')
+    elif data.get('@content.downloadUrl'):
+        downloadUrl=data.get('@content.downloadUrl')
     else:
         ErrorLogger().print_r('Getting resource:{} {} error:{}'.format(id,filename,data.get('error').get('message')))
         downloadUrl=data.get('error').get('message')
@@ -159,7 +192,7 @@ def _getdownloadurl(id,user):
     return downloadUrl,play_url
 
 def GetDownloadUrl(id,user):
-    key_='downloadUrl:{}'.format(id)
+    key_='downloadurl:{}'.format(id)
     if redis_client.exists(key_):
         downloadUrl,play_url,ftime=redis_client.get(key_).split('####')
         if time.time()-int(ftime)>=600:
@@ -273,7 +306,6 @@ def _remote_content(fileid,user):
                 content=r.content
             else:
                 content=r.text
-            InfoLogger().print_r(content)
             redis_client.set(kc,content)
             return content
         else:
@@ -286,7 +318,6 @@ def has_item(path,name):
     if len(path.split('/'))==1:
         path=path+'/'
     key='has_item$#$#$#$#{}$#$#$#$#{}'.format(path,name)
-    InfoLogger().print_r('get key {}'.format(key))
     # if False:
     if redis_client.exists(key):
         values=redis_client.get(key)
@@ -414,7 +445,8 @@ def breadCrumb(path):
 
 
 
-def get_od_user():
+def get_od_user(admin=False):
+    balance=eval(GetConfig('balance'))
     config_path=os.path.join(config_dir,'self_config.py')
     with open(config_path,'r') as f:
         text=f.read()
@@ -428,16 +460,28 @@ def get_od_user():
     ret=[]
     for user,value in users.items():
         if value.get('client_id')!='':
-            #userid,username,endpoint,sharepath,order,
-            ret.append(
-                    (
-                        user,
-                        value.get('other_name'),
-                        '/{}:'.format(user),
-                        value.get('share_path'),
-                        value.get('order')
+            #userid,username,endpoint,sharepath,order
+            if balance and not admin:
+                if user==GetConfig('default_pan'):
+                    ret.append(
+                            (
+                                user,
+                                value.get('other_name'),
+                                '/{}:'.format(user),
+                                value.get('share_path'),
+                                value.get('order')
+                            )
+                        )
+            else:
+                ret.append(
+                        (
+                            user,
+                            value.get('other_name'),
+                            '/{}:'.format(user),
+                            value.get('share_path'),
+                            value.get('order')
+                        )
                     )
-                )
         else:
             ret.append(
                     (
@@ -461,3 +505,48 @@ def GetCookie(key,default):
     if key=='image_mode':
         value=int(value)
     return value
+
+
+def GetSubDirectory(current_path):
+    if (not current_path.endswith(':/')) and current_path.endswith('/'):
+        current_path=current_path[:-1]
+    retdata=[]
+    if current_path.endswith(':/'):
+        user=current_path.split(':')[0]
+        subfolders=mon_db.items.find({'user':user,'grandid':0,'type':'folder'})
+        for f in subfolders:
+            info={}
+            info['id']=f['id']
+            info['name']=f['name']
+            info['path']=f['path']
+            retdata.append(info)
+        return retdata
+    folder=mon_db.items.find_one({'path':current_path})
+    if folder is None:
+        return []
+    pid=folder['id']
+    subfolders=mon_db.items.find({'parent':pid,'type':'folder'})
+    for f in subfolders:
+        info={}
+        info['id']=f['id']
+        info['name']=f['name']
+        info['path']=f['path']
+        retdata.append(info)
+    return retdata
+
+
+def GetTreeList(user):
+    sp='&nbsp;&nbsp;&nbsp;&nbsp;'
+    treelists=[]
+    treelists.append({'path':'/','grandid':0,'split':''})
+    folders=mon_db.items.find({'user':user,'type':'folder'})
+    for folder in folders:
+        info={}
+        info['path']=folder['path']
+        info['grandid']=folder['grandid']+1
+        info['split']=sp*(folder['grandid']+1)
+        treelists.append(info)
+    treelists.sort(key=lambda x:x['grandid'])
+    return treelists
+
+

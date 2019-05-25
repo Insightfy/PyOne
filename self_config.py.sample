@@ -22,6 +22,10 @@ tj_code=""""""
 headCode=""""""
 footCode=""""""
 cssCode=""""""
+robots="""
+User-agent:  *
+Disallow:  /
+"""
 
 #主题设置
 theme="material"
@@ -65,6 +69,12 @@ encrypt_file="no"
 
 #默认盘位
 default_pan="A"
+
+#后台路径
+admin_prefix="admin"
+
+#是否做负载均衡
+balance="False"
 
 od_users={
     "A":{
